@@ -1,0 +1,30 @@
+# Byte-compiled / optimized files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+
+# Test and coverage artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE and editor files
+.idea/
+.vscode/
+
+# Local databases and environment variables
+*.db
+*.sqlite
+*.sqlite3
+.env
