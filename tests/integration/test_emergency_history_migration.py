@@ -28,7 +28,7 @@ class EmergencyHistoryMigrationTests(unittest.TestCase):
         self.empty_migrations = self.root / "empty-migrations"
         self.empty_migrations.mkdir()
         self._create_version_two_database(self.database_path, self.empty_migrations)
-        self.assertEqual(DatabaseInitializer(self.database_path).initialize(), 3)
+        self.assertEqual(DatabaseInitializer(self.database_path).initialize(), 7)
         self.addCleanup(self.temporary_directory.cleanup)
         self.connection = ConnectionManager(self.database_path).connect()
         self.addCleanup(self.connection.close)
@@ -155,6 +155,149 @@ class EmergencyHistoryMigrationTests(unittest.TestCase):
             (self.user_ids[username],),
         )
         return int(cursor.lastrowid)
+
+    def _insert_doctor_intake_update(
+        self,
+        username: str,
+        version_no: int,
+        previous_notes: str,
+        updated_notes: str,
+        event_type: str = "intake_updated",
+    ) -> None:
+        audit_log_id = self._insert_audit_log(username)
+        self.connection.execute(
+            """
+            INSERT INTO emergency_intake_history (
+                emergency_case_id, version_no, previous_case_number_snapshot,
+                case_number_snapshot, previous_patient_id_snapshot,
+                patient_id_snapshot, previous_intake_user_id_snapshot,
+                intake_user_id_snapshot, previous_arrival_at_snapshot,
+                arrival_at_snapshot, intake_notes_snapshot,
+                previous_intake_notes_snapshot, event_type, change_reason,
+                record_origin, event_at, actor_user_id, audit_log_id
+            )
+            VALUES (
+                1, ?, 'ER-SYNTH-001', 'ER-SYNTH-001', 1, 1, ?, ?,
+                '2026-01-01T10:00:00Z', '2026-01-01T10:00:00Z', ?, ?,
+                ?, 'Synthetic doctor correction',
+                'application_event', '2026-03-01T11:00:00Z', ?, ?
+            )
+            """,
+            (
+                version_no,
+                self.user_ids["synthetic-receptionist"],
+                self.user_ids["synthetic-receptionist"],
+                updated_notes,
+                previous_notes,
+                event_type,
+                self.user_ids[username],
+                audit_log_id,
+            ),
+        )
+
+    def test_only_active_current_doctor_can_update_intake_notes(self) -> None:
+        self._insert_doctor_intake_update(
+            "synthetic-doctor",
+            2,
+            "Synthetic intake note",
+            "Synthetic doctor correction",
+        )
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT intake_notes FROM emergency_cases WHERE emergency_case_id = 1"
+            ).fetchone()[0],
+            "Synthetic doctor correction",
+        )
+
+        with self.assertRaises(sqlite3.IntegrityError):
+            self._insert_doctor_intake_update(
+                "synthetic-doctor-two",
+                3,
+                "Synthetic doctor correction",
+                "Rejected non-assigned correction",
+            )
+
+        self.connection.execute(
+            "UPDATE doctors SET is_active = 0 WHERE doctor_id = ?",
+            (self.doctor_ids["Synthetic Doctor"],),
+        )
+        with self.assertRaises(sqlite3.IntegrityError):
+            self._insert_doctor_intake_update(
+                "synthetic-doctor",
+                3,
+                "Synthetic doctor correction",
+                "Rejected inactive-profile correction",
+            )
+        self.connection.execute(
+            "UPDATE doctors SET is_active = 1 WHERE doctor_id = ?",
+            (self.doctor_ids["Synthetic Doctor"],),
+        )
+
+        self.connection.execute(
+            "UPDATE users SET is_active = 0 WHERE user_id = ?",
+            (self.user_ids["synthetic-doctor"],),
+        )
+        with self.assertRaises(sqlite3.IntegrityError):
+            self._insert_doctor_intake_update(
+                "synthetic-doctor",
+                3,
+                "Synthetic doctor correction",
+                "Rejected inactive-account correction",
+            )
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT intake_notes FROM emergency_cases WHERE emergency_case_id = 1"
+            ).fetchone()[0],
+            "Synthetic doctor correction",
+        )
+
+    def test_closed_case_rejects_direct_intake_update_atomically(self) -> None:
+        self._close_case()
+        history_count = self.connection.execute(
+            """
+            SELECT COUNT(*) FROM emergency_intake_history
+            WHERE emergency_case_id = 1
+            """
+        ).fetchone()[0]
+        audit_count = self.connection.execute(
+            "SELECT COUNT(*) FROM audit_logs"
+        ).fetchone()[0]
+        for username, event_type in (
+            ("synthetic-doctor", "intake_updated"),
+            ("synthetic-admin", "patient_linked"),
+        ):
+            with self.subTest(username=username, event_type=event_type):
+                with self.assertRaises(sqlite3.IntegrityError):
+                    with TransactionManager(self.connection).transaction():
+                        self._insert_doctor_intake_update(
+                            username,
+                            2,
+                            "Synthetic intake note",
+                            "Rejected closed-case update",
+                            event_type,
+                        )
+                self.assertEqual(
+                    self.connection.execute(
+                        "SELECT intake_notes FROM emergency_cases "
+                        "WHERE emergency_case_id = 1"
+                    ).fetchone()[0],
+                    "Synthetic intake note",
+                )
+                self.assertEqual(
+                    self.connection.execute(
+                        """
+                        SELECT COUNT(*) FROM emergency_intake_history
+                        WHERE emergency_case_id = 1
+                        """
+                    ).fetchone()[0],
+                    history_count,
+                )
+                self.assertEqual(
+                    self.connection.execute(
+                        "SELECT COUNT(*) FROM audit_logs"
+                    ).fetchone()[0],
+                    audit_count,
+                )
 
     def _close_case(
         self,
@@ -334,6 +477,59 @@ class EmergencyHistoryMigrationTests(unittest.TestCase):
             ).fetchall()],
             [tuple(row) for row in case_rows],
         )
+
+    def test_migration_0007_preserves_existing_version_six_history(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            database_path = root / "version-six.db"
+            empty_migrations = root / "empty-migrations"
+            version_six_migrations = root / "version-six-migrations"
+            empty_migrations.mkdir()
+            version_six_migrations.mkdir()
+            self._create_version_two_database(database_path, empty_migrations)
+
+            source_migrations = (
+                Path(__file__).resolve().parents[2] / "database" / "migrations"
+            )
+            for version in range(3, 7):
+                source_path = next(
+                    source_migrations.glob(f"{version:04d}_*.sql")
+                )
+                (version_six_migrations / source_path.name).write_text(
+                    source_path.read_text(encoding="utf-8"),
+                    encoding="utf-8",
+                )
+
+            self.assertEqual(
+                DatabaseInitializer(
+                    database_path,
+                    migrations_dir=version_six_migrations,
+                ).initialize(),
+                6,
+            )
+            with ConnectionManager(database_path).connection() as connection:
+                history_before = {
+                    table_name: [
+                        tuple(row)
+                        for row in connection.execute(
+                            f"SELECT * FROM {table_name} ORDER BY rowid"
+                        )
+                    ]
+                    for table_name in _HISTORY_TABLES
+                }
+
+            self.assertEqual(DatabaseInitializer(database_path).initialize(), 7)
+            with ConnectionManager(database_path).connection() as connection:
+                history_after = {
+                    table_name: [
+                        tuple(row)
+                        for row in connection.execute(
+                            f"SELECT * FROM {table_name} ORDER BY rowid"
+                        )
+                    ]
+                    for table_name in _HISTORY_TABLES
+                }
+            self.assertEqual(history_after, history_before)
 
     def test_triage_and_outcome_values_and_other_explanation_are_constrained(
         self,

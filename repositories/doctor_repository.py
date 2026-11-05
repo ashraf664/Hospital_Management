@@ -65,15 +65,66 @@ class DoctorRepository(BaseRepository):
             return None
         return self.find_by_id(doctor_id)
 
-    def deactivate(self, doctor_id: int) -> Doctor | None:
-        """Deactivate a doctor without deleting its directory history."""
+    def deactivate(
+        self,
+        doctor_id: int,
+        *,
+        linked_user_was_active: bool | None = None,
+    ) -> Doctor | None:
+        """Deactivate a doctor and retain the linked account's prior state."""
+        if linked_user_was_active is not None and type(linked_user_was_active) is not bool:
+            raise TypeError("linked_user_was_active must be a boolean or None.")
         cursor = self._execute(
-            "UPDATE doctors SET is_active = 0 WHERE doctor_id = ?",
+            """
+            UPDATE doctors
+            SET is_active = 0,
+                account_was_active_before_deactivation = ?
+            WHERE doctor_id = ? AND is_active = 1
+            """,
+            (
+                (
+                    int(linked_user_was_active)
+                    if linked_user_was_active is not None
+                    else None
+                ),
+                doctor_id,
+            ),
+        )
+        if cursor.rowcount == 0:
+            return None
+        return self.find_by_id(doctor_id)
+
+    def activate(self, doctor_id: int) -> Doctor | None:
+        """Reactivate a retained doctor and clear its consumed state marker."""
+        cursor = self._execute(
+            """
+            UPDATE doctors
+            SET is_active = 1,
+                account_was_active_before_deactivation = NULL
+            WHERE doctor_id = ? AND is_active = 0
+            """,
             (doctor_id,),
         )
         if cursor.rowcount == 0:
             return None
         return self.find_by_id(doctor_id)
+
+    def linked_user_was_active_before_deactivation(
+        self,
+        doctor_id: int,
+    ) -> bool | None:
+        """Return the saved account state, or None for pre-migration history."""
+        row = self._fetchone(
+            """
+            SELECT account_was_active_before_deactivation
+            FROM doctors
+            WHERE doctor_id = ? AND is_active = 0
+            """,
+            (doctor_id,),
+        )
+        if row is None or row["account_was_active_before_deactivation"] is None:
+            return None
+        return bool(row["account_was_active_before_deactivation"])
 
     def find_by_id(self, doctor_id: int) -> Doctor | None:
         """Find a doctor by its primary key."""

@@ -20,6 +20,8 @@ class UserRepository(BaseRepository):
 
     def create(self, user: User) -> UserSummary:
         """Insert an account and return only display-safe database values."""
+        if user.role is UserRole.OWNER:
+            raise ValueError("Owner accounts can only be created during first setup.")
         cursor = self._execute(
             """
             INSERT INTO users (username, password_hash, role, is_active)
@@ -33,7 +35,11 @@ class UserRepository(BaseRepository):
             ),
         )
         row = self._fetchone(
-            f"SELECT {_USER_SUMMARY_COLUMNS} FROM users WHERE user_id = ?",
+            f"""
+            SELECT {_USER_SUMMARY_COLUMNS}, 0 AS is_owner
+            FROM users
+            WHERE user_id = ?
+            """,
             (int(cursor.lastrowid),),
         )
         if row is None:
@@ -49,6 +55,8 @@ class UserRepository(BaseRepository):
         role: UserRole,
     ) -> UserSummary | None:
         """Update account identity and role without changing its password hash."""
+        if role is UserRole.OWNER:
+            raise ValueError("Owner role cannot be assigned through account management.")
         cursor = self._execute(
             """
             UPDATE users
@@ -56,6 +64,10 @@ class UserRepository(BaseRepository):
                 role = ?,
                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
             WHERE user_id = ?
+              AND NOT EXISTS (
+                  SELECT 1 FROM owner_accounts
+                  WHERE owner_accounts.user_id = users.user_id
+              )
             """,
             (username, role.value, user_id),
         )
@@ -71,6 +83,29 @@ class UserRepository(BaseRepository):
             SET is_active = 0,
                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
             WHERE user_id = ?
+              AND NOT EXISTS (
+                  SELECT 1 FROM owner_accounts
+                  WHERE owner_accounts.user_id = users.user_id
+              )
+            """,
+            (user_id,),
+        )
+        if cursor.rowcount == 0:
+            return None
+        return self.find_by_id(user_id)
+
+    def activate(self, user_id: int) -> UserSummary | None:
+        """Reactivate a retained non-Owner account."""
+        cursor = self._execute(
+            """
+            UPDATE users
+            SET is_active = 1,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+            WHERE user_id = ?
+              AND NOT EXISTS (
+                  SELECT 1 FROM owner_accounts
+                  WHERE owner_accounts.user_id = users.user_id
+              )
             """,
             (user_id,),
         )
@@ -81,7 +116,15 @@ class UserRepository(BaseRepository):
     def find_by_id(self, user_id: int) -> UserSummary | None:
         """Find display-safe account fields without selecting password_hash."""
         row = self._fetchone(
-            f"SELECT {_USER_SUMMARY_COLUMNS} FROM users WHERE user_id = ?",
+            f"""
+            SELECT {_USER_SUMMARY_COLUMNS},
+                   EXISTS (
+                       SELECT 1 FROM owner_accounts
+                       WHERE owner_accounts.user_id = users.user_id
+                   ) AS is_owner
+            FROM users
+            WHERE user_id = ?
+            """,
             (user_id,),
         )
         return self._summary_from_row(row) if row is not None else None
@@ -89,7 +132,15 @@ class UserRepository(BaseRepository):
     def find_for_authentication(self, username: str) -> User | None:
         """Fetch an account including its hash for internal authentication."""
         row = self._fetchone(
-            f"SELECT {_AUTHENTICATION_COLUMNS} FROM users WHERE username = ?",
+            f"""
+            SELECT {_AUTHENTICATION_COLUMNS},
+                   EXISTS (
+                       SELECT 1 FROM owner_accounts
+                       WHERE owner_accounts.user_id = users.user_id
+                   ) AS is_owner
+            FROM users
+            WHERE username = ?
+            """,
             (username,),
         )
         return self._user_from_row(row) if row is not None else None
@@ -97,7 +148,16 @@ class UserRepository(BaseRepository):
     def has_admin_account(self) -> bool:
         """Return whether any Admin account exists, active or inactive."""
         row = self._fetchone(
-            "SELECT 1 FROM users WHERE role = ? LIMIT 1",
+            """
+            SELECT 1
+            FROM users
+            WHERE role = ?
+                AND NOT EXISTS (
+                    SELECT 1 FROM owner_accounts
+                    WHERE owner_accounts.user_id = users.user_id
+                )
+            LIMIT 1
+            """,
             (UserRole.ADMIN.value,),
         )
         return row is not None
@@ -118,8 +178,17 @@ class UserRepository(BaseRepository):
             clauses += ("username = ?",)
             parameters += (username,)
         if role is not None:
-            clauses += ("role = ?",)
-            parameters += (role.value,)
+            if role is UserRole.OWNER:
+                clauses += (
+                    "EXISTS (SELECT 1 FROM owner_accounts "
+                    "WHERE owner_accounts.user_id = users.user_id)",
+                )
+            else:
+                clauses += (
+                    "role = ? AND NOT EXISTS (SELECT 1 FROM owner_accounts "
+                    "WHERE owner_accounts.user_id = users.user_id)",
+                )
+                parameters += (role.value,)
         if is_active is not None:
             clauses += ("is_active = ?",)
             parameters += (int(is_active),)
@@ -132,7 +201,11 @@ class UserRepository(BaseRepository):
         total_count = int(count_row["total_count"]) if count_row is not None else 0
         rows = self._fetchall(
             f"""
-            SELECT {_USER_SUMMARY_COLUMNS}
+            SELECT {_USER_SUMMARY_COLUMNS},
+                   EXISTS (
+                       SELECT 1 FROM owner_accounts
+                       WHERE owner_accounts.user_id = users.user_id
+                   ) AS is_owner
             FROM users{where_sql}
             ORDER BY user_id ASC
             LIMIT ? OFFSET ?
@@ -154,7 +227,11 @@ class UserRepository(BaseRepository):
         return UserSummary(
             user_id=int(row["user_id"]),
             username=str(row["username"]),
-            role=UserRole(row["role"]),
+            role=(
+                UserRole.OWNER
+                if bool(row["is_owner"])
+                else UserRole(row["role"])
+            ),
             is_active=bool(row["is_active"]),
         )
 
@@ -164,7 +241,11 @@ class UserRepository(BaseRepository):
             user_id=int(row["user_id"]),
             username=str(row["username"]),
             password_hash=str(row["password_hash"]),
-            role=UserRole(row["role"]),
+            role=(
+                UserRole.OWNER
+                if bool(row["is_owner"])
+                else UserRole(row["role"])
+            ),
             is_active=bool(row["is_active"]),
             created_at=str(row["created_at"]),
             updated_at=str(row["updated_at"]),

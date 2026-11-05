@@ -38,26 +38,29 @@ These exclusions do not reduce the requirement to fully implement the six in-sco
 
 ## 2. User Roles and Authorization
 
-Users must sign in with an active account. Each account has one of the roles below. The application must enforce permissions in its service/business layer as well as hide or disable unavailable UI actions; UI visibility alone is not authorization.
+Users must sign in with an active account. Each account has one of the roles below. Owner is a single, independently protected first-run identity represented separately from ordinary account roles. The application must enforce permissions in its service/business layer as well as hide or disable unavailable UI actions; UI visibility alone is not authorization.
 
-| Capability | Admin | Doctor | Receptionist |
-|---|---|---|---|
-| Sign in, sign out, view own profile | Yes | Yes | Yes |
-| Create, update, deactivate user accounts and assign roles | Yes | No | No |
-| Manage departments | Yes | No | No |
-| Manage doctor directory and department assignment | Yes | No; may view own profile | No; may view directory |
-| Add and update patient demographics | Yes | Yes, for patients involved in own care | Yes |
-| Search and display patient demographics | Yes | Yes, for patients involved in own care | Yes |
-| Create and manage appointments | Yes | View own schedule; update appointment clinical status | Yes |
-| Add and update emergency intake details | Yes | Yes, for assigned cases | Yes |
-| Triage and update clinical emergency details | No | Yes, for assigned cases | No |
-| View, create, and update medical records | No by default | Yes, for patients involved in own care | No |
-| Delete or permanently erase clinical records | No | No | No |
-| View audit events | Yes, without clinical note contents | No | No |
+| Capability | Owner | Admin | Doctor | Receptionist |
+|---|---|---|---|---|
+| Sign in, sign out, view own profile | Yes | Yes | Yes | Yes |
+| Create, update, deactivate user accounts and assign ordinary roles | Yes | Yes | No | No |
+| Create another Owner or change Owner identity | No | No | No | No |
+| Manage departments | Yes | Yes | No | No |
+| Manage doctor directory and department assignment | Yes | Yes | No; may view own profile | No; may view directory |
+| Add and update patient demographics | Yes | Yes | Yes, for patients involved in own care | Yes |
+| Search and display patient demographics | Yes | Yes | Yes, for patients involved in own care | Yes |
+| Create and manage appointments | Yes | Yes | View own schedule; update own appointment clinical status | Yes |
+| Add and update emergency intake details | Yes | Yes | Yes, for assigned cases | Yes |
+| Triage and update clinical emergency details | No | No | Yes, for assigned cases | No |
+| View, create, and update medical records | No | No | Yes, for patients involved in own care | No |
+| Delete or permanently erase clinical records | No | No | No | No |
+| View audit events | Yes, without clinical note contents | Yes, without clinical note contents | No | No |
 
 **Authorization rules**
 
 - Admin privileges do not automatically grant access to medical record contents.
+- Owner privileges are limited to system administration and audit metadata; Owner does not receive clinical-content access by default.
+- Exactly one Owner may be established during first-run setup, only before any user account exists. Ordinary account administration cannot create, replace, deactivate, or change the Owner; recovery requires a separately approved procedure.
 - Doctors may access only records and cases related to their care responsibilities. Access outside that scope requires an explicitly approved future policy.
 - Receptionists may access demographic and scheduling information needed for intake but not diagnoses, treatment notes, or other medical record contents.
 - Account deactivation must prevent future sign-in without erasing historical activity.
@@ -127,7 +130,7 @@ Required custom data structures must be implemented within the project rather th
 All structures below are custom implementations; do not substitute a ready-made data-structure library. Complexity figures are expected time bounds for the stated operations. For hash-based structures, average-case bounds assume a suitable hash function and controlled load factor; worst-case collisions can make an operation O(n). For dynamic arrays, append is amortized.
 
 | Data structure | Intended use and rationale | Basic operations, purpose, and expected time complexity |
-|---|---|---|
+|---|---|---|---|---|
 | Custom dynamic array/list | Hold bounded, ordered query results for screen tables and other in-memory collections. Do not load an unbounded hospital history. | `get(index)` / `set(index, value)` for indexed access or replacement: O(1). `append(value)` to add a result: amortized O(1). `insert(index, value)` / `remove_at(index)` to modify a position while preserving order: O(n) due to shifting. `find(value)` for a linear lookup: O(n). `iterate()` to display/process all elements: O(n). |
 | Custom hash table | Temporarily map unique patient, doctor, or appointment identifiers to permitted in-memory results. Database uniqueness remains authoritative. | `put(key, value)` to add or replace: expected O(1), worst O(n). `get(key)` / `contains(key)` to look up or test membership: expected O(1), worst O(n). `remove(key)` to remove an in-memory entry: expected O(1), worst O(n). `iterate_entries()` to visit all entries: O(n). |
 | Custom queue | Preserve first-in-first-out order for intake or administrative work where that ordering is approved; it is not a substitute for clinical triage. | `enqueue(value)` to add at the rear: amortized O(1). `dequeue()` to remove the oldest item: O(1). `peek()` to inspect the oldest item without removal: O(1). `is_empty()` / `size()` for queue state: O(1). `find(value)` when needed: O(n). |
@@ -151,7 +154,7 @@ Empty-state behavior, bounds/resize behavior where relevant, and error condition
 All tables use a primary key. Foreign keys must be enabled for each database connection. Use `NOT NULL`, `UNIQUE`, `CHECK`, and indexes where appropriate. Store timestamps consistently in an agreed format (recommended: UTC ISO 8601 text) and convert for display.
 
 | Table | Core fields (proposed) | Relationships and notes |
-|---|---|---|
+|---|---|---|---|---|
 | `users` | `user_id`, `username`, `password_hash`, `role`, `is_active`, `created_at`, `updated_at` | One account may be linked to one doctor profile; Admin and Receptionist accounts need no doctor profile. Store password hashes, never plaintext passwords. |
 | `departments` | `department_id`, `name`, `description`, `is_active`, `created_at`, `updated_at` | One department has zero or more doctors. Department name must be unique under the agreed case-sensitivity policy. |
 | `doctors` | `doctor_id`, `user_id`, `department_id`, `full_name`, `specialty`, `phone`, `is_active` | `user_id` is unique and references `users`; `department_id` references `departments`. |
@@ -279,7 +282,7 @@ All list screens should provide clear empty states, loading/operation feedback, 
 - Apply sensible maximum lengths and input formats to names, phone numbers, addresses, and free text; exact formats and limits require stakeholder approval.
 - Do not treat user-provided search text as SQL. Use parameterized database operations.
 - Protect authentication secrets using a vetted password-hashing approach; do not store plaintext passwords or log credentials.
-- On first-run initialization only, provide a controlled procedure for creating the first Admin account with a credential chosen during setup. Do not ship or generate a fixed/default password, silently create an account, or provide a path that bypasses authentication, authorization, password protection, or required audit logging. Disable first-Admin setup after successful creation; require an explicit, separately approved recovery procedure if no active Admin remains.
+- On first-run initialization only, provide a controlled procedure for creating the single Owner account with a credential chosen during setup. The Owner is the initial system-administration account; create no default credential and do not silently create the account. Store only a salted, memory-hard password hash and atomically audit the setup. Disable first-Owner setup after any account is created; require a separately approved recovery procedure if the Owner is unavailable.
 - Prevent unauthorized access even if a screen is invoked outside its expected navigation path.
 - Collect only necessary patient data. Define applicable privacy, consent, retention, and audit policies before real clinical use.
 

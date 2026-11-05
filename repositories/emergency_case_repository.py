@@ -88,6 +88,172 @@ class EmergencyCaseRepository(BaseRepository):
         )
         return self._case_from_row(row) if row is not None else None
 
+    def record_case_created(
+        self,
+        case: EmergencyCase,
+        *,
+        actor_user_id: int,
+        audit_log_id: int,
+        event_at: str,
+    ) -> None:
+        """Record the initial intake and status snapshots for a new case."""
+        self._execute(
+            """
+            INSERT INTO emergency_status_history (
+                emergency_case_id, sequence_no, previous_status, new_status,
+                transition_type, record_origin, event_at, actor_user_id,
+                audit_log_id
+            )
+            VALUES (?, 1, NULL, ?, 'case_created',
+                    'application_event', ?, ?, ?)
+            """,
+            (
+                case.emergency_case_id,
+                case.status,
+                event_at,
+                actor_user_id,
+                audit_log_id,
+            ),
+        )
+        self._execute(
+            """
+            INSERT INTO emergency_intake_history (
+                emergency_case_id, version_no, case_number_snapshot,
+                patient_id_snapshot, intake_user_id_snapshot,
+                arrival_at_snapshot, intake_notes_snapshot, event_type,
+                record_origin, event_at, actor_user_id, audit_log_id
+            )
+            VALUES (?, 1, ?, ?, ?, ?, ?, 'case_created',
+                    'application_event', ?, ?, ?)
+            """,
+            (
+                case.emergency_case_id,
+                case.case_number,
+                case.patient_id,
+                case.intake_user_id,
+                case.arrival_at,
+                case.intake_notes,
+                event_at,
+                actor_user_id,
+                audit_log_id,
+            ),
+        )
+
+    def record_doctor_assignment(
+        self,
+        emergency_case_id: int,
+        doctor_id: int,
+        *,
+        actor_user_id: int,
+        audit_log_id: int,
+        change_reason: str,
+        event_at: str,
+    ) -> EmergencyCase | None:
+        """Append an assignment event; its trigger changes the current doctor."""
+        case = self.find_by_id(emergency_case_id)
+        if case is None:
+            return None
+
+        sequence_row = self._fetchone(
+            """
+            SELECT COALESCE(MAX(sequence_no), 0) + 1 AS next_sequence
+            FROM emergency_doctor_assignments
+            WHERE emergency_case_id = ?
+            """,
+            (emergency_case_id,),
+        )
+        if sequence_row is None:
+            raise PersistenceIntegrityError(
+                "Emergency doctor assignment sequence could not be determined."
+            )
+
+        self._execute(
+            """
+            INSERT INTO emergency_doctor_assignments (
+                emergency_case_id, sequence_no, previous_doctor_id,
+                new_doctor_id, change_reason, record_origin, event_at,
+                actor_user_id, audit_log_id
+            )
+            VALUES (?, ?, ?, ?, ?, 'application_event', ?, ?, ?)
+            """,
+            (
+                emergency_case_id,
+                int(sequence_row["next_sequence"]),
+                case.assigned_doctor_id,
+                doctor_id,
+                change_reason,
+                event_at,
+                actor_user_id,
+                audit_log_id,
+            ),
+        )
+        return self.find_by_id(emergency_case_id)
+
+    def update_intake_notes(
+        self,
+        emergency_case_id: int,
+        intake_notes: str,
+        *,
+        actor_user_id: int,
+        audit_log_id: int,
+        change_reason: str,
+        event_at: str,
+    ) -> EmergencyCase | None:
+        """Append an intake snapshot; the trigger applies the new notes."""
+        case = self.find_by_id(emergency_case_id)
+        if case is None:
+            return None
+
+        version_row = self._fetchone(
+            """
+            SELECT COALESCE(MAX(version_no), 0) + 1 AS next_version
+            FROM emergency_intake_history
+            WHERE emergency_case_id = ?
+            """,
+            (emergency_case_id,),
+        )
+        if version_row is None:
+            raise PersistenceIntegrityError(
+                "Emergency intake history version could not be determined."
+            )
+
+        self._execute(
+            """
+            INSERT INTO emergency_intake_history (
+                emergency_case_id, version_no, previous_case_number_snapshot,
+                case_number_snapshot, previous_patient_id_snapshot,
+                patient_id_snapshot, previous_intake_user_id_snapshot,
+                intake_user_id_snapshot, previous_arrival_at_snapshot,
+                arrival_at_snapshot, intake_notes_snapshot,
+                previous_intake_notes_snapshot, event_type, change_reason,
+                record_origin, event_at, actor_user_id, audit_log_id
+            )
+            VALUES (
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                'intake_updated', ?, 'application_event', ?, ?, ?
+            )
+            """,
+            (
+                emergency_case_id,
+                int(version_row["next_version"]),
+                case.case_number,
+                case.case_number,
+                case.patient_id,
+                case.patient_id,
+                case.intake_user_id,
+                case.intake_user_id,
+                case.arrival_at,
+                case.arrival_at,
+                intake_notes,
+                case.intake_notes,
+                change_reason,
+                event_at,
+                actor_user_id,
+                audit_log_id,
+            ),
+        )
+        return self.find_by_id(emergency_case_id)
+
     def link_patient(
         self,
         emergency_case_id: int,

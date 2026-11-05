@@ -97,6 +97,21 @@ class PatientRepository(BaseRepository):
             return None
         return self.find_by_id(patient_id)
 
+    def activate(self, patient_id: int) -> Patient | None:
+        """Reactivate a retained patient record."""
+        cursor = self._execute(
+            """
+            UPDATE patients
+            SET is_active = 1,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+            WHERE patient_id = ?
+            """,
+            (patient_id,),
+        )
+        if cursor.rowcount == 0:
+            return None
+        return self.find_by_id(patient_id)
+
     def find_by_id(self, patient_id: int) -> Patient | None:
         """Find a patient by primary key."""
         row = self._fetchone(
@@ -137,6 +152,7 @@ class PatientRepository(BaseRepository):
         patient_number: str | None = None,
         full_name: str | None = None,
         phone: str | None = None,
+        query: str | None = None,
         is_active: bool | None = None,
         doctor_id: int | None = None,
         limit: int = DEFAULT_PAGE_LIMIT,
@@ -155,6 +171,16 @@ class PatientRepository(BaseRepository):
         if phone is not None:
             clauses += ("""patient.phone LIKE ? ESCAPE '\\'""",)
             parameters += (self._like_pattern(phone),)
+        if query is not None:
+            pattern = self._like_pattern(query)
+            clauses += (
+                """(
+                    patient.patient_number LIKE ? ESCAPE '\\'
+                    OR patient.full_name LIKE ? ESCAPE '\\'
+                    OR patient.phone LIKE ? ESCAPE '\\'
+                )""",
+            )
+            parameters += (pattern, pattern, pattern)
         if is_active is not None:
             clauses += ("patient.is_active = ?",)
             parameters += (int(is_active),)

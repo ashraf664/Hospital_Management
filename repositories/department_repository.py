@@ -72,6 +72,21 @@ class DepartmentRepository(BaseRepository):
             return None
         return self.find_by_id(department_id)
 
+    def activate(self, department_id: int) -> Department | None:
+        """Reactivate a retained department."""
+        cursor = self._execute(
+            """
+            UPDATE departments
+            SET is_active = 1,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+            WHERE department_id = ?
+            """,
+            (department_id,),
+        )
+        if cursor.rowcount == 0:
+            return None
+        return self.find_by_id(department_id)
+
     def find_by_id(self, department_id: int) -> Department | None:
         """Find one department, returning None when it does not exist."""
         row = self._fetchone(

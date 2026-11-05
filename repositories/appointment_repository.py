@@ -107,7 +107,7 @@ class AppointmentRepository(BaseRepository):
         cursor = self._execute(
             """
             UPDATE appointments
-            SET status = 'cancelled',
+            SET status = 'Cancelled',
                 cancellation_reason = ?,
                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
             WHERE appointment_id = ?

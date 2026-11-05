@@ -14,7 +14,7 @@ from repositories import (
     PersistenceConstraintError,
     UserRepository,
 )
-from services import EmergencyCaseService
+from services import AuthorizationService, EmergencyCaseService, SessionRegistry
 
 
 class EmergencyCaseServiceTests(unittest.TestCase):
@@ -26,11 +26,22 @@ class EmergencyCaseServiceTests(unittest.TestCase):
         self.user_repository = UserRepository(self.connection)
         self.patient_repository = PatientRepository(self.connection)
         self.case_repository = EmergencyCaseRepository(self.connection)
-        self.service = EmergencyCaseService(self.connection)
         self.admin_id = self.create_user("synthetic-admin", UserRole.ADMIN)
         self.receptionist_id = self.create_user(
             "synthetic-receptionist",
             UserRole.RECEPTIONIST,
+        )
+        self.session_registry = SessionRegistry()
+        self.receptionist_session = self.session_registry.issue(
+            self.receptionist_id
+        )
+        self.authorization_service = AuthorizationService(
+            self.connection,
+            self.session_registry,
+        )
+        self.service = EmergencyCaseService(
+            self.connection,
+            self.authorization_service,
         )
         self.patient_id = self.create_patient("SYNTH-SERVICE-001")
         self.case = self.create_case()
@@ -85,7 +96,7 @@ class EmergencyCaseServiceTests(unittest.TestCase):
         linked = self.service.link_patient(
             self.case.emergency_case_id,
             self.patient_id,
-            self.receptionist_id,
+            self.receptionist_session,
             "Patient identity confirmed",
         )
 
@@ -151,7 +162,9 @@ class EmergencyCaseServiceTests(unittest.TestCase):
             UserRole.ADMIN,
             is_active=False,
         )
-        audit_count = self.audit_count()
+        link_audit_count = self.connection.execute(
+            "SELECT COUNT(*) FROM audit_logs WHERE action = 'patient_linked'"
+        ).fetchone()[0]
 
         for actor_id in (doctor_id, inactive_admin_id, 9999):
             with self.subTest(actor_id=actor_id):
@@ -159,23 +172,30 @@ class EmergencyCaseServiceTests(unittest.TestCase):
                     self.service.link_patient(
                         self.case.emergency_case_id,
                         self.patient_id,
-                        actor_id,
+                        self.session_registry.issue(actor_id),
                         "Synthetic link reason",
                     )
 
-        self.assertEqual(self.audit_count(), audit_count)
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM audit_logs WHERE action = 'patient_linked'"
+            ).fetchone()[0],
+            link_audit_count,
+        )
         self.assertIsNone(
             self.case_repository.find_by_id(self.case.emergency_case_id).patient_id
         )
 
     def test_missing_case_or_patient_does_not_create_audit(self) -> None:
-        audit_count = self.audit_count()
+        link_audit_count = self.connection.execute(
+            "SELECT COUNT(*) FROM audit_logs WHERE action = 'patient_linked'"
+        ).fetchone()[0]
 
         self.assertIsNone(
             self.service.link_patient(
                 9999,
                 self.patient_id,
-                self.receptionist_id,
+                self.receptionist_session,
                 "Synthetic missing case",
             )
         )
@@ -183,11 +203,16 @@ class EmergencyCaseServiceTests(unittest.TestCase):
             self.service.link_patient(
                 self.case.emergency_case_id,
                 9999,
-                self.receptionist_id,
+                self.receptionist_session,
                 "Synthetic missing patient",
             )
         )
-        self.assertEqual(self.audit_count(), audit_count)
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM audit_logs WHERE action = 'patient_linked'"
+            ).fetchone()[0],
+            link_audit_count,
+        )
 
     def test_history_failure_rolls_back_audit_and_case_update(self) -> None:
         self.connection.execute(
@@ -204,7 +229,7 @@ class EmergencyCaseServiceTests(unittest.TestCase):
             self.service.link_patient(
                 self.case.emergency_case_id,
                 self.patient_id,
-                self.admin_id,
+                self.session_registry.issue(self.admin_id),
                 "Synthetic rollback test",
             )
 

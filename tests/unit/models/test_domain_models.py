@@ -249,10 +249,10 @@ class DomainModelTests(unittest.TestCase):
         self.assertIsNone(event.occurred_at)
         self.assertEqual(event.details, "")
 
-    def test_enums_match_only_schema_defined_role_and_actor_values(self) -> None:
+    def test_application_roles_and_audit_actor_values(self) -> None:
         self.assertEqual(
             {role.value for role in UserRole},
-            {"Admin", "Doctor", "Receptionist"},
+            {"Admin", "Doctor", "Owner", "Receptionist"},
         )
         self.assertEqual(
             {actor.value for actor in AuditActorType},

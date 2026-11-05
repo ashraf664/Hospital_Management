@@ -173,7 +173,7 @@ class AppointmentRepositoryTests(unittest.TestCase):
         cancelled = self.appointment_repository.cancel(created.appointment_id)
 
         self.assertIsNotNone(cancelled)
-        self.assertEqual(cancelled.status, "cancelled")
+        self.assertEqual(cancelled.status, "Cancelled")
         self.assertIsNone(cancelled.cancellation_reason)
         self.assertEqual(cancelled.appointment_id, created.appointment_id)
         self.assertIsNone(self.appointment_repository.cancel(9999))

@@ -33,7 +33,9 @@ EMERGENCY_HISTORY_TABLES = {
     "emergency_intake_history",
     "emergency_closure_versions",
 }
-EXPECTED_TABLES = INITIAL_SCHEMA_TABLES | EMERGENCY_HISTORY_TABLES
+EXPECTED_TABLES = INITIAL_SCHEMA_TABLES | EMERGENCY_HISTORY_TABLES | {
+    "owner_accounts",
+}
 SCHEMA_DEFINITION_PATTERN = re.compile(
     r"CREATE\s+(?:UNIQUE\s+)?(TABLE|INDEX|TRIGGER)\s+"
     r"([A-Za-z_][A-Za-z0-9_]*)",
@@ -277,7 +279,7 @@ class DatabaseFoundationIntegrationTests(unittest.TestCase):
         self.database_path = Path(self.temporary_directory.name) / "hms_test.db"
         self.initializer = DatabaseInitializer(self.database_path)
         self.connection_manager = ConnectionManager(self.database_path)
-        self.assertEqual(self.initializer.initialize(), 3)
+        self.assertEqual(self.initializer.initialize(), 7)
         self.connection = self.connection_manager.connect()
         self.addCleanup(self.temporary_directory.cleanup)
         self.addCleanup(self.connection.close)
@@ -425,7 +427,7 @@ class DatabaseFoundationIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(
             self.connection.execute("PRAGMA user_version").fetchone()[0],
-            3,
+            7,
         )
 
     def test_schema_has_no_duplicate_table_index_or_trigger_definitions(self) -> None:
@@ -508,7 +510,7 @@ class DatabaseFoundationIntegrationTests(unittest.TestCase):
             root = Path(temporary_directory)
             fresh_path = root / "fresh.db"
             legacy_path = root / "legacy.db"
-            self.assertEqual(DatabaseInitializer(fresh_path).initialize(), 3)
+            self.assertEqual(DatabaseInitializer(fresh_path).initialize(), 7)
             self.create_v1_database(legacy_path)
             migration_directory = (
                 Path(__file__).resolve().parents[2] / "database" / "migrations"
@@ -518,7 +520,7 @@ class DatabaseFoundationIntegrationTests(unittest.TestCase):
                     legacy_path,
                     migrations_dir=migration_directory,
                 ).initialize(),
-                3,
+                7,
             )
 
             with (
@@ -549,6 +551,83 @@ class DatabaseFoundationIntegrationTests(unittest.TestCase):
                     "emergency_cases",
                 ):
                     self.assertIn(f"{table_name}_no_delete", fresh_schema["triggers"])
+
+    def test_doctor_activation_migration_preserves_existing_doctor_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            database_path = root / "legacy-v4.db"
+            older_migrations = root / "migrations-v4"
+            older_migrations.mkdir()
+            source_migrations = (
+                Path(__file__).resolve().parents[2] / "database" / "migrations"
+            )
+            for migration_name in (
+                "0003_add_emergency_history.sql",
+                "0004_add_single_owner_account.sql",
+            ):
+                (older_migrations / migration_name).write_text(
+                    (source_migrations / migration_name).read_text(
+                        encoding="utf-8"
+                    ),
+                    encoding="utf-8",
+                )
+
+            self.assertEqual(
+                DatabaseInitializer(
+                    database_path,
+                    migrations_dir=older_migrations,
+                ).initialize(),
+                4,
+            )
+            with ConnectionManager(database_path).connection() as connection:
+                user_cursor = connection.execute(
+                    """
+                    INSERT INTO users (username, password_hash, role)
+                    VALUES ('synthetic-legacy-doctor', 'test-only-hash', 'Doctor')
+                    """
+                )
+                department_cursor = connection.execute(
+                    "INSERT INTO departments (name) VALUES ('Synthetic legacy department')"
+                )
+                doctor_cursor = connection.execute(
+                    """
+                    INSERT INTO doctors (
+                        user_id, department_id, full_name, specialty
+                    )
+                    VALUES (?, ?, 'Synthetic legacy physician',
+                            'Synthetic specialty')
+                    """,
+                    (user_cursor.lastrowid, department_cursor.lastrowid),
+                )
+                doctor_id = int(doctor_cursor.lastrowid)
+
+            self.assertEqual(DatabaseInitializer(database_path).initialize(), 7)
+
+            with ConnectionManager(database_path).connection() as connection:
+                doctor = connection.execute(
+                    """
+                    SELECT full_name, account_was_active_before_deactivation
+                    FROM doctors WHERE doctor_id = ?
+                    """,
+                    (doctor_id,),
+                ).fetchone()
+                self.assertEqual(doctor["full_name"], "Synthetic legacy physician")
+                self.assertIsNone(
+                    doctor["account_was_active_before_deactivation"]
+                )
+                self.assertEqual(
+                    connection.execute("PRAGMA user_version").fetchone()[0],
+                    7,
+                )
+                with self.assertRaises(sqlite3.IntegrityError):
+                    connection.execute(
+                        """
+                        UPDATE doctors
+                        SET account_was_active_before_deactivation = 2
+                        WHERE doctor_id = ?
+                        """,
+                        (doctor_id,),
+                    )
 
     def test_normalize_sql_preserves_literals_and_behavioral_differences(self) -> None:
         formatted_table = """
@@ -686,11 +765,11 @@ class DatabaseFoundationIntegrationTests(unittest.TestCase):
                     executor.map(initialize_after_barrier, initializers)
                 )
 
-            self.assertEqual(results, [3, 3])
+            self.assertEqual(results, [7, 7])
             with ConnectionManager(database_path).connection() as connection:
                 self.assertEqual(
                     connection.execute("PRAGMA user_version").fetchone()[0],
-                    3,
+                    7,
                 )
                 migration_objects = connection.execute(
                     """
@@ -860,13 +939,13 @@ class DatabaseFoundationIntegrationTests(unittest.TestCase):
                     ).fetchone()
                 )
 
-            self.assertEqual(initializer.initialize(), 3)
-            self.assertEqual(initializer.initialize(), 3)
+            self.assertEqual(initializer.initialize(), 7)
+            self.assertEqual(initializer.initialize(), 7)
 
             with ConnectionManager(database_path).connection() as connection:
                 self.assertEqual(
                     connection.execute("PRAGMA user_version").fetchone()[0],
-                    3,
+                    7,
                 )
                 trigger_names = {
                     row["name"]
